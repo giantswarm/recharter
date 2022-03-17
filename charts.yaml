@@ -1,0 +1,4 @@
+- name: "cilium"
+  versions: ">= 1.11.2"
+  srcHelmRepo: "https://helm.cilium.io"
+  dstCatalog: "default-test"
