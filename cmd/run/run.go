@@ -63,7 +63,7 @@ func sync(config syncConfig) (err error, exitCode int) {
 	}
 	defer resp.Body.Close()
 
-	srcEntries, err := parseIndex(resp.Body, config.SrcHelmRepo, config.Versions)
+	srcReleases, err := parseIndex(resp.Body, config.SrcHelmRepo, config.Chart, config.Versions)
 	if err != nil {
 		return fmt.Errorf("parsing source (%s) index: %w", srcIndexURL, err), 1
 	}
@@ -77,7 +77,7 @@ func sync(config syncConfig) (err error, exitCode int) {
 
 	catalogURL := "https://giantswarm.github.io/" + config.DstCatalog
 
-	dstEntries, err := parseIndex(file, catalogURL, "*")
+	dstReleases, err := parseIndex(file, catalogURL, config.Chart, "*")
 	if err != nil {
 		return fmt.Errorf("parsing destination (%s) index: %w", dstIndexPath, err), 1
 	}
@@ -87,43 +87,39 @@ func sync(config syncConfig) (err error, exitCode int) {
 	shell.Cmdf("mkdir ./tmp-recharter-tarballs").OrDie()
 
 	downloaded := false
-	for chart, infos := range srcEntries {
-		dstInfos := dstEntries[chart]
-
-		for _, srcInfo := range infos {
-			found := false
-			for _, dstInfo := range dstInfos {
-				if dstInfo.Version == srcInfo.Version {
-					found = true
-					break
-				}
+	for _, srcReleases := range srcReleases {
+		found := false
+		for _, dstRelease := range dstReleases {
+			if dstRelease.Version == srcReleases.Version {
+				found = true
+				break
 			}
-			if found {
-				fmt.Printf("--> Chart %s@%s found in the %q catalog, skipping\n", chart, srcInfo.Version, config.DstCatalog)
-			} else {
-				downloaded = true
-				res, err := http.Get(srcInfo.URL)
-				if err != nil {
-					return fmt.Errorf("downloading tarball from %q: %w", srcInfo.URL, err), 1
-				}
-				defer res.Body.Close()
-
-				tarballFile := "./tmp-recharter-tarballs/" + srcInfo.URL[strings.LastIndex(srcInfo.URL, "/")+1:]
-				file, err := os.OpenFile(tarballFile, os.O_CREATE|os.O_WRONLY, 0644)
-				if err != nil {
-					return fmt.Errorf("creating file %q: %w", tarballFile, err), 1
-				}
-				defer file.Close()
-
-				_, err = io.Copy(file, res.Body)
-				if err != nil {
-					return fmt.Errorf("copying response content to %q file: %w", tarballFile, err), 1
-				}
-
-				shell.Cmdf("helm pull %q --version=%q", chart, srcInfo.Version).
-					WithDir("./tmp-recharter-tarballs").
-					OrDie()
+		}
+		if found {
+			fmt.Printf("--> Chart %s@%s found in the %q catalog, skipping\n", config.Chart, srcReleases.Version, config.DstCatalog)
+		} else {
+			downloaded = true
+			res, err := http.Get(srcReleases.URL)
+			if err != nil {
+				return fmt.Errorf("downloading tarball from %q: %w", srcReleases.URL, err), 1
 			}
+			defer res.Body.Close()
+
+			tarballFile := "./tmp-recharter-tarballs/" + srcReleases.URL[strings.LastIndex(srcReleases.URL, "/")+1:]
+			file, err := os.OpenFile(tarballFile, os.O_CREATE|os.O_WRONLY, 0644)
+			if err != nil {
+				return fmt.Errorf("creating file %q: %w", tarballFile, err), 1
+			}
+			defer file.Close()
+
+			_, err = io.Copy(file, res.Body)
+			if err != nil {
+				return fmt.Errorf("copying response content to %q file: %w", tarballFile, err), 1
+			}
+
+			shell.Cmdf("helm pull %q --version=%q", config.Chart, srcReleases.Version).
+				WithDir("./tmp-recharter-tarballs").
+				OrDie()
 		}
 	}
 
@@ -148,9 +144,7 @@ func sync(config syncConfig) (err error, exitCode int) {
 	return nil, 0
 }
 
-// parseIndex returns a map where keys are chart names and values are lists of
-// versions of the charts.
-func parseIndex(data io.Reader, repoURL, versionRange string) (map[string][]releaseInfo, error) {
+func parseIndex(data io.Reader, repoURL, chart, versionRange string) ([]releaseInfo, error) {
 	repoURL = strings.TrimSuffix(repoURL, "/index.yaml")
 	repoURL = strings.TrimSuffix(repoURL, "/")
 
@@ -175,35 +169,35 @@ func parseIndex(data io.Reader, repoURL, versionRange string) (map[string][]rele
 		return nil, fmt.Errorf("unmarshaling index YAML: %w", err)
 	}
 
-	res := make(map[string][]releaseInfo, len(index.Entries))
-
-	for chart, releases := range index.Entries {
-		var infos []releaseInfo
-		for _, r := range releases {
-			v, err := semver.NewVersion(r.Version)
-			if err != nil {
-				return nil, fmt.Errorf("parsing semver for %q: %w", r.Version, err)
-			}
-
-			if !versionConstraint.Check(v) {
-				continue
-			}
-
-			if len(r.URLs) == 0 {
-				return nil, fmt.Errorf("no URLs found for %s@%s", chart, r.Version)
-			}
-			url := r.URLs[0]
-			if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-				url = repoURL + "/" + url
-			}
-			info := releaseInfo{
-				Version: r.Version,
-				URL:     url,
-			}
-			infos = append(infos, info)
-		}
-		res[chart] = infos
+	releases, ok := index.Entries[chart]
+	if !ok {
+		return nil, fmt.Errorf("no chart %q found in %s/index.yaml", chart, repoURL)
 	}
 
-	return res, nil
+	var infos []releaseInfo
+	for _, r := range releases {
+		v, err := semver.NewVersion(r.Version)
+		if err != nil {
+			return nil, fmt.Errorf("parsing semver for %q: %w", r.Version, err)
+		}
+
+		if !versionConstraint.Check(v) {
+			continue
+		}
+
+		if len(r.URLs) == 0 {
+			return nil, fmt.Errorf("no URLs found for %s@%s", chart, r.Version)
+		}
+		url := r.URLs[0]
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			url = repoURL + "/" + url
+		}
+		info := releaseInfo{
+			Version: r.Version,
+			URL:     url,
+		}
+		infos = append(infos, info)
+	}
+
+	return infos, nil
 }

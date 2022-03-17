@@ -23,7 +23,7 @@ func loadConfig(path string) ([]syncConfig, error) {
 }
 
 type syncConfig struct {
-	Name        string `json:"name"`
+	Chart       string `json:"chart"`
 	Versions    string `json:"versions"`
 	SrcHelmRepo string `json:"srcHelmRepo"`
 	DstCatalog  string `json:"dstCatalog"`
